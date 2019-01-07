@@ -4,20 +4,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // NewClient creates a new Client.
 func NewClient(url string, client Getter) Client {
 	return Client{
-		BaseURL:    url,
-		HTTPClient: client,
+		BaseURL:         url,
+		HTTPClient:      client,
+		CachedResponses: make(map[string]*CachedResponse),
+		CacheTime:       time.Duration(1 + time.Hour),
 	}
 }
 
 // Client is the struct containing the URL and the http client used to make Google Places API requests.
 type Client struct {
-	BaseURL    string
-	HTTPClient Getter
+	BaseURL         string
+	HTTPClient      Getter
+	CachedResponses map[string]*CachedResponse
+	CacheTime       time.Duration
 }
 
 // Getter requires the Get method, which is identical to the http.Client method Get.
@@ -46,6 +51,19 @@ type Result struct {
 	Geometry Geometry `json:"geometry"`
 }
 
+// CachedResponse is a Response struct embedded in a struct suitable for in-memory caching.
+type CachedResponse struct {
+	*Response
+	Timestamp time.Time
+}
+
+func (c *CachedResponse) upToDate(t time.Time, d time.Duration) bool {
+	if t.After(c.Timestamp.Add(d)) {
+		return false
+	}
+	return true
+}
+
 // Geometry contains the coordinates for the result's place.
 type Geometry struct {
 	Location struct {
@@ -62,8 +80,13 @@ type Params struct {
 }
 
 // Nearby is a Client method that makes the Google Places Nearby API request using the provided parameters and the hardcoded radius of 2 km.
-func (c *Client) Nearby(ctx context.Context, params Params) (Response, error) {
-	r, err := c.HTTPClient.Get(fmt.Sprintf("%s?key=%s&location=%s&type=%s&radius=2000", c.BaseURL, params.Key, params.Location, params.PlaceType))
+func (c *Client) Nearby(params Params) (Response, error) {
+	url := fmt.Sprintf("%s?key=%s&location=%s&type=%s&radius=2000", c.BaseURL, params.Key, params.Location, params.PlaceType)
+	if c.CachedResponses[url] != nil && c.CachedResponses[url].upToDate(time.Now(), c.CacheTime) {
+		return *c.CachedResponses[url].Response, nil
+	}
+
+	r, err := c.HTTPClient.Get(url)
 	if err != nil {
 		return Response{}, err
 	}
@@ -73,6 +96,11 @@ func (c *Client) Nearby(ctx context.Context, params Params) (Response, error) {
 	err = json.NewDecoder(r.Body).Decode(&res)
 	if err != nil {
 		return Response{}, err
+	}
+
+	c.CachedResponses[url] = &CachedResponse{
+		Response:  &res,
+		Timestamp: time.Now(),
 	}
 
 	return res, nil
